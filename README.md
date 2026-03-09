@@ -953,6 +953,7 @@ See [aieos.org](https://aieos.org) for the full schema and live examples.
 | ----------- | ------ | -------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | `/health`   | GET    | None                                                                 | Health check (always public, no secrets leaked)                          |
 | `/pair`     | POST   | `X-Pairing-Code` header                                              | Exchange one-time code for bearer token                                  |
+| `/api/pairing/code` | POST | Bearer token or loopback-local caller | Issue a new one-time pairing code |
 | `/webhook`  | POST   | `Authorization: Bearer <token>`                                      | Send message: `{"message": "your prompt"}`; optional `X-Idempotency-Key` |
 | `/whatsapp` | GET    | Query params                                                         | Meta webhook verification (hub.mode, hub.verify_token, hub.challenge)    |
 | `/whatsapp` | POST   | Meta signature (`X-Hub-Signature-256`) when app secret is configured | WhatsApp incoming message webhook                                        |
@@ -968,6 +969,7 @@ See [aieos.org](https://aieos.org) for the full schema and live examples.
 | `service install/start/stop/status/uninstall` | Manage background service (systemd user-level or OpenRC system-wide)                 |
 | `doctor`                                      | Diagnose daemon/scheduler/channel freshness                                          |
 | `status`                                      | Show full system status                                                              |
+| `pair`                                        | Issue a new one-time pairing code for Web UI login                                  |
 | `estop`                                       | Engage/resume emergency-stop levels and view estop status                            |
 | `cron`                                        | Manage scheduled tasks (`list/add/add-at/add-every/once/remove/update/pause/resume`) |
 | `models`                                      | Refresh provider model catalogs (`models refresh`)                                   |

@@ -2,7 +2,7 @@
 
 This reference is derived from the current CLI surface (`zeroclaw --help`).
 
-Last verified: **February 21, 2026**.
+Last verified: **March 9, 2026**.
 
 ## Top-Level Commands
 
@@ -15,6 +15,7 @@ Last verified: **February 21, 2026**.
 | `service` | Manage user-level OS service lifecycle |
 | `doctor` | Run diagnostics and freshness checks |
 | `status` | Print current configuration and system summary |
+| `pair` | Issue a one-time pairing code for Web UI login |
 | `estop` | Engage/resume emergency stop levels and inspect estop state |
 | `cron` | Manage scheduled tasks |
 | `models` | Refresh provider model catalogs |
@@ -91,6 +92,16 @@ Notes:
 - `zeroclaw service restart`
 - `zeroclaw service status`
 - `zeroclaw service uninstall`
+
+### `pair`
+
+- `zeroclaw pair`
+
+Notes:
+
+- `pair` requests a fresh one-time pairing code from the running gateway.
+- For security, code issuance is allowed for loopback-local callers or authenticated API callers.
+- Pairing itself is still completed through `POST /pair` (Web UI handles this automatically).
 
 ### `cron`
 

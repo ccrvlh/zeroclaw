@@ -37,6 +37,7 @@ use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use dialoguer::{Input, Password};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
+use std::time::Duration;
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -263,6 +264,9 @@ Examples:
 
     /// Show system status (full details)
     Status,
+
+    /// Issue a one-time pairing code for Web UI login
+    Pair,
 
     /// Engage, inspect, and resume emergency-stop states.
     ///
@@ -910,6 +914,8 @@ async fn main() -> Result<()> {
             Ok(())
         }
 
+        Commands::Pair => issue_pairing_code(&config).await,
+
         Commands::Estop {
             estop_command,
             level,
@@ -1043,6 +1049,78 @@ async fn main() -> Result<()> {
             }
         },
     }
+}
+
+#[derive(Deserialize)]
+struct PairingCodeIssueResponse {
+    code: String,
+}
+
+fn normalize_pair_command_host(host: &str) -> String {
+    let trimmed = host.trim();
+    if trimmed.is_empty() || trimmed == "0.0.0.0" {
+        return "127.0.0.1".to_string();
+    }
+
+    let unbracketed = trimmed.trim_start_matches('[').trim_end_matches(']');
+    if unbracketed == "::" {
+        return "::1".to_string();
+    }
+
+    unbracketed.to_string()
+}
+
+fn gateway_base_url_for_pair_command(host: &str, port: u16) -> String {
+    if host.contains(':') {
+        format!("http://[{host}]:{port}")
+    } else {
+        format!("http://{host}:{port}")
+    }
+}
+
+async fn issue_pairing_code(config: &Config) -> Result<()> {
+    if !config.gateway.require_pairing {
+        println!("Pairing is disabled in config (`gateway.require_pairing = false`).");
+        return Ok(());
+    }
+
+    let host = normalize_pair_command_host(&config.gateway.host);
+    let base_url = gateway_base_url_for_pair_command(&host, config.gateway.port);
+    let issue_url = format!("{base_url}/api/pairing/code");
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .context("Failed to build HTTP client")?;
+
+    let response = client.post(&issue_url).send().await.with_context(|| {
+        format!(
+            "Failed to reach gateway at {base_url}. Make sure `zeroclaw daemon` or `zeroclaw service start` is running."
+        )
+    })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::NOT_FOUND
+            || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+        {
+            bail!(
+                "Failed to issue pairing code ({status}). The running gateway likely does not support `/api/pairing/code` yet. Restart/update `zeroclaw daemon` or `zeroclaw service` and try again."
+            );
+        }
+        bail!("Failed to issue pairing code ({status}): {body}");
+    }
+
+    let payload: PairingCodeIssueResponse = response
+        .json()
+        .await
+        .context("Gateway returned invalid pairing-code payload")?;
+
+    println!("Pairing code: {}", payload.code);
+    println!("Web UI: {base_url}/");
+    println!("Enter this code in the browser pairing screen.");
+    Ok(())
 }
 
 fn handle_estop_command(
@@ -1946,6 +2024,22 @@ mod tests {
             Commands::Onboard { force, .. } => assert!(force),
             other => panic!("expected onboard command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cli_parses_pair_command() {
+        let cli = Cli::try_parse_from(["zeroclaw", "pair"]).expect("pair command should parse");
+        match cli.command {
+            Commands::Pair => {}
+            other => panic!("expected pair command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pair_host_normalization_uses_loopback_for_wildcard_binds() {
+        assert_eq!(normalize_pair_command_host("0.0.0.0"), "127.0.0.1");
+        assert_eq!(normalize_pair_command_host("::"), "::1");
+        assert_eq!(normalize_pair_command_host("[::]"), "::1");
     }
 
     #[test]

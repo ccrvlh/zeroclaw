@@ -575,6 +575,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     }
     println!("  🌐 Web Dashboard: http://{display_addr}/");
     println!("  POST /pair      — pair a new client (X-Pairing-Code header)");
+    println!("  POST /api/pairing/code — issue one-time code (auth or local bootstrap)");
     println!("  POST /webhook   — {{\"message\": \"your prompt\"}}");
     if whatsapp_channel.is_some() {
         println!("  GET  /whatsapp  — Meta webhook verification");
@@ -596,15 +597,15 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     println!("  GET  /metrics   — Prometheus metrics");
     if let Some(code) = pairing.pairing_code() {
         println!();
-        println!("  🔐 PAIRING REQUIRED — use this one-time code:");
+        println!("  PAIRING REQUIRED — use this one-time code:");
         println!("     ┌──────────────┐");
         println!("     │  {code}  │");
         println!("     └──────────────┘");
         println!("     Send: POST /pair with header X-Pairing-Code: {code}");
     } else if pairing.require_pairing() {
-        println!("  🔒 Pairing: ACTIVE (bearer token required)");
+        println!("  Pairing: ACTIVE (bearer token required)");
     } else {
-        println!("  ⚠️  Pairing: DISABLED (all requests accepted)");
+        println!("  Pairing: DISABLED (all requests accepted)");
     }
     println!("  Press Ctrl+C to stop.\n");
 
@@ -658,6 +659,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/health", get(handle_health))
         .route("/metrics", get(handle_metrics))
         .route("/pair", post(handle_pair))
+        .route("/api/pairing/code", post(handle_issue_pairing_code))
         .route("/webhook", post(handle_webhook))
         .route("/whatsapp", get(handle_whatsapp_verify))
         .route("/whatsapp", post(handle_whatsapp_message))
@@ -708,6 +710,69 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     .await?;
 
     Ok(())
+}
+
+fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|auth| auth.strip_prefix("Bearer "))
+}
+
+/// POST /api/pairing/code — issue a fresh one-time pairing code.
+///
+/// Access policy:
+/// - Authenticated clients may always issue a code.
+/// - Unauthenticated loopback requests are allowed for local CLI operators.
+#[axum::debug_handler]
+async fn handle_issue_pairing_code(
+    State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !state.pairing.require_pairing() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Pairing is disabled by configuration"
+            })),
+        );
+    }
+
+    let authenticated = extract_bearer_token(&headers)
+        .map(|token| state.pairing.is_authenticated(token))
+        .unwrap_or(false);
+    let bootstrap_local = peer_addr.ip().is_loopback();
+
+    if !authenticated && !bootstrap_local {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "Unauthorized — use Bearer token, or issue from local loopback"
+            })),
+        );
+    }
+
+    let code = match state.pairing.issue_pairing_code() {
+        Some(code) => code,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "Pairing is disabled by configuration"
+                })),
+            );
+        }
+    };
+
+    tracing::info!("Issued one-time pairing code");
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "code": code,
+            "message": "Enter this code in the Web UI pairing screen"
+        })),
+    )
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -773,9 +838,9 @@ async fn handle_pair(
 
     match state.pairing.try_pair(code, &rate_key).await {
         Ok(Some(token)) => {
-            tracing::info!("🔐 New client paired successfully");
+            tracing::info!("New client paired successfully");
             if let Err(err) = persist_pairing_tokens(state.config.clone(), &state.pairing).await {
-                tracing::error!("🔐 Pairing succeeded but token persistence failed: {err:#}");
+                tracing::error!("Pairing succeeded but token persistence failed: {err:#}");
                 let body = serde_json::json!({
                     "paired": true,
                     "persisted": false,
@@ -794,13 +859,13 @@ async fn handle_pair(
             (StatusCode::OK, Json(body))
         }
         Ok(None) => {
-            tracing::warn!("🔐 Pairing attempt with invalid code");
+            tracing::warn!("Pairing attempt with invalid code");
             let err = serde_json::json!({"error": "Invalid pairing code"});
             (StatusCode::FORBIDDEN, Json(err))
         }
         Err(lockout_secs) => {
             tracing::warn!(
-                "🔐 Pairing locked out — too many failed attempts ({lockout_secs}s remaining)"
+                "Pairing locked out — too many failed attempts ({lockout_secs}s remaining)"
             );
             let err = serde_json::json!({
                 "error": format!("Too many failed attempts. Try again in {lockout_secs}s."),
@@ -1984,6 +2049,75 @@ mod tests {
 
     fn test_connect_info() -> ConnectInfo<SocketAddr> {
         ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 30_300)))
+    }
+
+    fn test_app_state_with_pairing(require_pairing: bool, existing_tokens: &[String]) -> AppState {
+        AppState {
+            config: Arc::new(Mutex::new(Config::default())),
+            provider: Arc::new(MockProvider::default()),
+            model: "test-model".into(),
+            temperature: 0.0,
+            mem: Arc::new(MockMemory),
+            auto_save: false,
+            webhook_secret_hash: None,
+            pairing: Arc::new(PairingGuard::new(require_pairing, existing_tokens)),
+            trust_forwarded_headers: false,
+            rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
+            idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
+            whatsapp: None,
+            whatsapp_app_secret: None,
+            linq: None,
+            linq_signing_secret: None,
+            nextcloud_talk: None,
+            nextcloud_talk_webhook_secret: None,
+            wati: None,
+            observer: Arc::new(crate::observability::NoopObserver),
+            tools_registry: Arc::new(Vec::new()),
+            cost_tracker: None,
+            event_tx: tokio::sync::broadcast::channel(16).0,
+        }
+    }
+
+    #[tokio::test]
+    async fn issue_pairing_code_allows_loopback_bootstrap_before_first_pair() {
+        let state = test_app_state_with_pairing(true, &[]);
+        let headers = HeaderMap::new();
+        let response = handle_issue_pairing_code(State(state), test_connect_info(), headers)
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        let code = json["code"].as_str().unwrap_or("");
+        assert_eq!(code.len(), 6);
+        assert!(code.chars().all(|c| c.is_ascii_digit()));
+    }
+
+    #[tokio::test]
+    async fn issue_pairing_code_denies_unauthenticated_non_loopback_requests() {
+        let state = test_app_state_with_pairing(true, &[]);
+        let headers = HeaderMap::new();
+        let response = handle_issue_pairing_code(
+            State(state),
+            ConnectInfo(SocketAddr::from(([203, 0, 113, 8], 31_337))),
+            headers,
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn issue_pairing_code_allows_loopback_when_already_paired() {
+        let state = test_app_state_with_pairing(true, &["zc_existing".to_string()]);
+        let headers = HeaderMap::new();
+        let response = handle_issue_pairing_code(State(state), test_connect_info(), headers)
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

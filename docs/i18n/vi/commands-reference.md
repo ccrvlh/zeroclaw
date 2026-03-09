@@ -2,7 +2,7 @@
 
 Dựa trên CLI hiện tại (`zeroclaw --help`).
 
-Xác minh lần cuối: **2026-02-20**.
+Xác minh lần cuối: **2026-03-09**.
 
 ## Lệnh cấp cao nhất
 
@@ -15,6 +15,7 @@ Xác minh lần cuối: **2026-02-20**.
 | `service` | Quản lý vòng đời dịch vụ cấp hệ điều hành |
 | `doctor` | Chạy chẩn đoán và kiểm tra trạng thái |
 | `status` | Hiển thị cấu hình và tóm tắt hệ thống |
+| `pair` | Cấp mã ghép cặp dùng một lần cho đăng nhập Web UI |
 | `cron` | Quản lý tác vụ định kỳ |
 | `models` | Làm mới danh mục model của provider |
 | `providers` | Liệt kê ID provider, bí danh và provider đang dùng |
@@ -57,6 +58,16 @@ Xác minh lần cuối: **2026-02-20**.
 - `zeroclaw service restart`
 - `zeroclaw service status`
 - `zeroclaw service uninstall`
+
+### `pair`
+
+- `zeroclaw pair`
+
+Ghi chú:
+
+- `pair` yêu cầu gateway đang chạy để cấp mã ghép cặp dùng một lần mới.
+- Vì bảo mật, thao tác cấp mã chỉ cho phép qua loopback cục bộ hoặc request API đã xác thực.
+- Việc ghép cặp vẫn hoàn tất qua `POST /pair` (Web UI sẽ tự xử lý).
 
 ### `cron`
 

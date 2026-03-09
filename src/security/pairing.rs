@@ -94,6 +94,18 @@ impl PairingGuard {
         self.require_pairing
     }
 
+    /// Issue and store a fresh one-time pairing code.
+    ///
+    /// Returns `None` when pairing is disabled.
+    pub fn issue_pairing_code(&self) -> Option<String> {
+        if !self.require_pairing {
+            return None;
+        }
+        let code = generate_code();
+        *self.pairing_code.lock() = Some(code.clone());
+        Some(code)
+    }
+
     fn try_pair_blocking(&self, code: &str, client_id: &str) -> Result<Option<String>, u64> {
         let client_id = normalize_client_key(client_id);
         let now = Instant::now();
@@ -336,6 +348,24 @@ mod tests {
     #[test]
     async fn new_guard_no_code_when_pairing_disabled() {
         let guard = PairingGuard::new(false, &[]);
+        assert!(guard.pairing_code().is_none());
+    }
+
+    #[test]
+    async fn issue_pairing_code_works_when_pairing_enabled() {
+        let guard = PairingGuard::new(true, &["zc_existing".into()]);
+        assert!(guard.pairing_code().is_none());
+
+        let code = guard.issue_pairing_code();
+        assert!(code.is_some());
+        assert_eq!(code.unwrap().len(), 6);
+        assert!(guard.pairing_code().is_some());
+    }
+
+    #[test]
+    async fn issue_pairing_code_returns_none_when_pairing_disabled() {
+        let guard = PairingGuard::new(false, &[]);
+        assert!(guard.issue_pairing_code().is_none());
         assert!(guard.pairing_code().is_none());
     }
 
