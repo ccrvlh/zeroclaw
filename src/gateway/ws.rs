@@ -85,12 +85,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             .default_provider
             .clone()
             .unwrap_or_else(|| "unknown".to_string());
+        let (provider, model, temperature) = state.llm_snapshot();
 
         // Broadcast agent_start event
         let _ = state.event_tx.send(serde_json::json!({
             "type": "agent_start",
-            "provider": provider_label,
-            "model": state.model,
+            "provider": provider_label.clone(),
+            "model": model.clone(),
         }));
 
         // Simple single-turn chat (no streaming for now — use provider.chat_with_system)
@@ -98,7 +99,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             let config_guard = state.config.lock();
             crate::channels::build_system_prompt(
                 &config_guard.workspace_dir,
-                &state.model,
+                &model,
                 &[],
                 &[],
                 Some(&config_guard.identity),
@@ -127,9 +128,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
             };
 
-        match state
-            .provider
-            .chat_with_history(&prepared.messages, &state.model, state.temperature)
+        match provider
+            .chat_with_history(&prepared.messages, &model, temperature)
             .await
         {
             Ok(response) => {
@@ -144,7 +144,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 let _ = state.event_tx.send(serde_json::json!({
                     "type": "agent_end",
                     "provider": provider_label,
-                    "model": state.model,
+                    "model": model,
                 }));
             }
             Err(e) => {

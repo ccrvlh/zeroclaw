@@ -78,6 +78,7 @@ pub async fn handle_api_status(
     }
 
     let config = state.config.lock().clone();
+    let (_, model, temperature) = state.llm_snapshot();
     let health = crate::health::snapshot();
 
     let mut channels = serde_json::Map::new();
@@ -88,8 +89,8 @@ pub async fn handle_api_status(
 
     let body = serde_json::json!({
         "provider": config.default_provider,
-        "model": state.model,
-        "temperature": state.temperature,
+        "model": model,
+        "temperature": temperature,
         "uptime_seconds": health.uptime_seconds,
         "gateway_port": config.gateway.port,
         "locale": "en",
@@ -175,8 +176,23 @@ pub async fn handle_api_config_put(
             .into_response();
     }
 
-    // Update in-memory config
+    // Rebuild live LLM runtime so Agent tab/WebSocket use the updated provider/model/key immediately.
+    let llm_state = match super::build_llm_state_from_config(&new_config) {
+        Ok(llm) => llm,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("Config saved but failed to apply live provider runtime: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
+    // Update in-memory config and live runtime snapshot.
     *state.config.lock() = new_config;
+    *state.llm.lock() = llm_state;
+
+    tracing::info!("Applied config update and reloaded live gateway LLM runtime");
 
     Json(serde_json::json!({"status": "ok"})).into_response()
 }

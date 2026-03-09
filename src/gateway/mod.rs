@@ -281,9 +281,7 @@ fn normalize_max_keys(configured: usize, fallback: usize) -> usize {
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Mutex<Config>>,
-    pub provider: Arc<dyn Provider>,
-    pub model: String,
-    pub temperature: f64,
+    pub llm: Arc<Mutex<GatewayLlmState>>,
     pub mem: Arc<dyn Memory>,
     pub auto_save: bool,
     /// SHA-256 hash of `X-Webhook-Secret` (hex-encoded), never plaintext.
@@ -312,6 +310,51 @@ pub struct AppState {
     pub event_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
 }
 
+#[derive(Clone)]
+pub struct GatewayLlmState {
+    pub provider: Arc<dyn Provider>,
+    pub model: String,
+    pub temperature: f64,
+}
+
+impl AppState {
+    pub(crate) fn llm_snapshot(&self) -> (Arc<dyn Provider>, String, f64) {
+        let llm = self.llm.lock();
+        (
+            Arc::clone(&llm.provider),
+            llm.model.clone(),
+            llm.temperature,
+        )
+    }
+}
+
+pub(super) fn build_llm_state_from_config(config: &Config) -> Result<GatewayLlmState> {
+    let provider: Arc<dyn Provider> = Arc::from(providers::create_resilient_provider_with_options(
+        config.default_provider.as_deref().unwrap_or("openrouter"),
+        config.api_key.as_deref(),
+        config.api_url.as_deref(),
+        &config.reliability,
+        &providers::ProviderRuntimeOptions {
+            auth_profile_override: None,
+            provider_api_url: config.api_url.clone(),
+            zeroclaw_dir: config.config_path.parent().map(std::path::PathBuf::from),
+            secrets_encrypt: config.secrets.encrypt,
+            reasoning_enabled: config.runtime.reasoning_enabled,
+        },
+    )?);
+    let model = config
+        .default_model
+        .clone()
+        .unwrap_or_else(|| "anthropic/claude-sonnet-4".into());
+    let temperature = config.default_temperature;
+
+    Ok(GatewayLlmState {
+        provider,
+        model,
+        temperature,
+    })
+}
+
 /// Run the HTTP gateway using axum with proper HTTP/1.1 compliance.
 #[allow(clippy::too_many_lines)]
 pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
@@ -338,24 +381,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     let actual_port = listener.local_addr()?.port();
     let display_addr = format!("{host}:{actual_port}");
 
-    let provider: Arc<dyn Provider> = Arc::from(providers::create_resilient_provider_with_options(
-        config.default_provider.as_deref().unwrap_or("openrouter"),
-        config.api_key.as_deref(),
-        config.api_url.as_deref(),
-        &config.reliability,
-        &providers::ProviderRuntimeOptions {
-            auth_profile_override: None,
-            provider_api_url: config.api_url.clone(),
-            zeroclaw_dir: config.config_path.parent().map(std::path::PathBuf::from),
-            secrets_encrypt: config.secrets.encrypt,
-            reasoning_enabled: config.runtime.reasoning_enabled,
-        },
-    )?);
-    let model = config
-        .default_model
-        .clone()
-        .unwrap_or_else(|| "anthropic/claude-sonnet-4".into());
-    let temperature = config.default_temperature;
+    let llm = build_llm_state_from_config(&config)?;
     let mem: Arc<dyn Memory> = Arc::from(memory::create_memory_with_storage(
         &config.memory,
         Some(&config.storage.provider.config),
@@ -625,9 +651,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
 
     let state = AppState {
         config: config_state,
-        provider,
-        model,
-        temperature,
+        llm: Arc::new(Mutex::new(llm)),
         mem,
         auto_save: config.memory.auto_save,
         webhook_secret_hash,
@@ -894,6 +918,7 @@ async fn persist_pairing_tokens(config: Arc<Mutex<Config>>, pairing: &PairingGua
 
 /// Simple chat for webhook endpoint (no tools, for backward compatibility and testing).
 async fn run_gateway_chat_simple(state: &AppState, message: &str) -> anyhow::Result<String> {
+    let (provider, model, temperature) = state.llm_snapshot();
     let user_messages = vec![ChatMessage::user(message)];
 
     // Keep webhook/gateway prompts aligned with channel behavior by injecting
@@ -902,7 +927,7 @@ async fn run_gateway_chat_simple(state: &AppState, message: &str) -> anyhow::Res
         let config_guard = state.config.lock();
         crate::channels::build_system_prompt(
             &config_guard.workspace_dir,
-            &state.model,
+            &model,
             &[], // tools - empty for simple chat
             &[], // skills
             Some(&config_guard.identity),
@@ -918,9 +943,8 @@ async fn run_gateway_chat_simple(state: &AppState, message: &str) -> anyhow::Res
     let prepared =
         crate::multimodal::prepare_messages_for_provider(&messages, &multimodal_config).await?;
 
-    state
-        .provider
-        .chat_with_history(&prepared.messages, &state.model, state.temperature)
+    provider
+        .chat_with_history(&prepared.messages, &model, temperature)
         .await
 }
 
@@ -1034,7 +1058,7 @@ async fn handle_webhook(
         .default_provider
         .clone()
         .unwrap_or_else(|| "unknown".to_string());
-    let model_label = state.model.clone();
+    let (_, model_label, _) = state.llm_snapshot();
     let started_at = Instant::now();
 
     state
@@ -1071,14 +1095,14 @@ async fn handle_webhook(
             state
                 .observer
                 .record_event(&crate::observability::ObserverEvent::AgentEnd {
-                    provider: provider_label,
-                    model: model_label,
+                    provider: provider_label.clone(),
+                    model: model_label.clone(),
                     duration,
                     tokens_used: None,
                     cost_usd: None,
                 });
 
-            let body = serde_json::json!({"response": response, "model": state.model});
+            let body = serde_json::json!({"response": response, "model": model_label});
             (StatusCode::OK, Json(body))
         }
         Err(e) => {
