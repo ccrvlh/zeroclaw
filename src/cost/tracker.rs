@@ -133,6 +133,40 @@ impl CostTracker {
         Ok(())
     }
 
+    /// Record usage from an LLM response event using configured model pricing.
+    pub fn record_llm_usage(
+        &self,
+        model: &str,
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+    ) -> Result<()> {
+        if !self.config.enabled {
+            return Ok(());
+        }
+
+        let input_tokens = input_tokens.unwrap_or(0);
+        let output_tokens = output_tokens.unwrap_or(0);
+        if input_tokens == 0 && output_tokens == 0 {
+            return Ok(());
+        }
+
+        let (input_price, output_price) = self
+            .config
+            .prices
+            .get(model)
+            .map(|pricing| (pricing.input, pricing.output))
+            .unwrap_or((0.0, 0.0));
+
+        let usage = TokenUsage::new(
+            model.to_string(),
+            input_tokens,
+            output_tokens,
+            input_price,
+            output_price,
+        );
+        self.record_usage(usage)
+    }
+
     /// Get the current cost summary.
     pub fn get_summary(&self) -> Result<CostSummary> {
         let (daily_cost, monthly_cost) = {
@@ -532,5 +566,27 @@ mod tests {
         assert!(err
             .to_string()
             .contains("Estimated cost must be a finite, non-negative value"));
+    }
+
+    #[test]
+    fn record_llm_usage_uses_pricing_table() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = enabled_config();
+        config.prices.insert(
+            "test/model".to_string(),
+            crate::config::schema::ModelPricing {
+                input: 1.0,
+                output: 2.0,
+            },
+        );
+
+        let tracker = CostTracker::new(config, tmp.path()).unwrap();
+        tracker
+            .record_llm_usage("test/model", Some(1000), Some(500))
+            .unwrap();
+
+        let summary = tracker.get_summary().unwrap();
+        assert_eq!(summary.request_count, 1);
+        assert!((summary.session_cost_usd - 0.002).abs() < 1e-12);
     }
 }

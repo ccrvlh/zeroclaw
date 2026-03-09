@@ -647,6 +647,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         Arc::new(sse::BroadcastObserver::new(
             crate::observability::create_observer(&config.observability),
             event_tx.clone(),
+            cost_tracker.clone(),
         ));
 
     let state = AppState {

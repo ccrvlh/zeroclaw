@@ -12,6 +12,7 @@ use axum::{
     },
 };
 use std::convert::Infallible;
+use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
@@ -61,14 +62,20 @@ pub async fn handle_sse_events(
 pub struct BroadcastObserver {
     inner: Box<dyn crate::observability::Observer>,
     tx: tokio::sync::broadcast::Sender<serde_json::Value>,
+    cost_tracker: Option<Arc<crate::cost::CostTracker>>,
 }
 
 impl BroadcastObserver {
     pub fn new(
         inner: Box<dyn crate::observability::Observer>,
         tx: tokio::sync::broadcast::Sender<serde_json::Value>,
+        cost_tracker: Option<Arc<crate::cost::CostTracker>>,
     ) -> Self {
-        Self { inner, tx }
+        Self {
+            inner,
+            tx,
+            cost_tracker,
+        }
     }
 }
 
@@ -76,6 +83,23 @@ impl crate::observability::Observer for BroadcastObserver {
     fn record_event(&self, event: &crate::observability::ObserverEvent) {
         // Forward to inner observer
         self.inner.record_event(event);
+
+        if let (
+            Some(cost_tracker),
+            crate::observability::ObserverEvent::LlmResponse {
+                success: true,
+                model,
+                input_tokens,
+                output_tokens,
+                ..
+            },
+        ) = (&self.cost_tracker, event)
+        {
+            if let Err(error) = cost_tracker.record_llm_usage(model, *input_tokens, *output_tokens)
+            {
+                tracing::warn!("Failed to record LLM usage for cost tracking: {error}");
+            }
+        }
 
         // Broadcast to SSE subscribers
         let json = match event {
@@ -154,5 +178,82 @@ impl crate::observability::Observer for BroadcastObserver {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::schema::{CostConfig, ModelPricing};
+    use crate::observability::traits::ObserverMetric;
+    use crate::observability::{Observer, ObserverEvent};
+    use parking_lot::Mutex;
+    use std::collections::HashMap;
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    #[derive(Default)]
+    struct TestObserver {
+        events: Mutex<u64>,
+    }
+
+    impl Observer for TestObserver {
+        fn record_event(&self, _event: &ObserverEvent) {
+            *self.events.lock() += 1;
+        }
+
+        fn record_metric(&self, _metric: &ObserverMetric) {}
+
+        fn name(&self) -> &str {
+            "test-observer"
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn llm_response_event_records_cost_usage() {
+        let tmp = TempDir::new().unwrap();
+        let mut prices = HashMap::new();
+        prices.insert(
+            "test/model".to_string(),
+            ModelPricing {
+                input: 1.0,
+                output: 2.0,
+            },
+        );
+        let cost_tracker = Arc::new(
+            crate::cost::CostTracker::new(
+                CostConfig {
+                    enabled: true,
+                    prices,
+                    ..Default::default()
+                },
+                tmp.path(),
+            )
+            .unwrap(),
+        );
+
+        let (tx, _rx) = tokio::sync::broadcast::channel(8);
+        let observer = BroadcastObserver::new(
+            Box::new(TestObserver::default()),
+            tx,
+            Some(cost_tracker.clone()),
+        );
+        observer.record_event(&ObserverEvent::LlmResponse {
+            provider: "openrouter".to_string(),
+            model: "test/model".to_string(),
+            duration: Duration::from_millis(10),
+            success: true,
+            error_message: None,
+            input_tokens: Some(1000),
+            output_tokens: Some(500),
+        });
+
+        let summary = cost_tracker.get_summary().unwrap();
+        assert_eq!(summary.request_count, 1);
+        assert!(summary.session_cost_usd > 0.0);
     }
 }
