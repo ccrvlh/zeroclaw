@@ -84,21 +84,35 @@ impl crate::observability::Observer for BroadcastObserver {
         // Forward to inner observer
         self.inner.record_event(event);
 
-        if let (
-            Some(cost_tracker),
+        match event {
             crate::observability::ObserverEvent::LlmResponse {
                 success: true,
                 model,
                 input_tokens,
                 output_tokens,
                 ..
-            },
-        ) = (&self.cost_tracker, event)
-        {
-            if let Err(error) = cost_tracker.record_llm_usage(model, *input_tokens, *output_tokens)
-            {
-                tracing::warn!("Failed to record LLM usage for cost tracking: {error}");
+            } => {
+                tracing::debug!(
+                    model = %model,
+                    input_tokens = ?input_tokens,
+                    output_tokens = ?output_tokens,
+                    has_cost_tracker = self.cost_tracker.is_some(),
+                    "Received successful LLM response event for cost tracking"
+                );
+
+                if let Some(cost_tracker) = &self.cost_tracker {
+                    if let Err(error) =
+                        cost_tracker.record_llm_usage(model, *input_tokens, *output_tokens)
+                    {
+                        tracing::warn!("Failed to record LLM usage for cost tracking: {error}");
+                    }
+                } else {
+                    tracing::warn!(
+                        "Cost tracker is not configured; LLM usage cannot be persisted for dashboard cost"
+                    );
+                }
             }
+            _ => {}
         }
 
         // Broadcast to SSE subscribers

@@ -147,6 +147,10 @@ impl CostTracker {
         let input_tokens = input_tokens.unwrap_or(0);
         let output_tokens = output_tokens.unwrap_or(0);
         if input_tokens == 0 && output_tokens == 0 {
+            tracing::debug!(
+                model = %model,
+                "Skipping cost record because provider reported no token usage"
+            );
             return Ok(());
         }
 
@@ -163,6 +167,15 @@ impl CostTracker {
             output_tokens,
             input_price,
             output_price,
+        );
+        tracing::info!(
+            model = %model,
+            input_tokens = input_tokens,
+            output_tokens = output_tokens,
+            input_price_per_million = input_price,
+            output_price_per_million = output_price,
+            cost_usd = usage.cost_usd,
+            "Recording LLM usage in cost tracker"
         );
         self.record_usage(usage)
     }

@@ -485,7 +485,17 @@ pub async fn handle_api_cost(
 
     if let Some(ref tracker) = state.cost_tracker {
         match tracker.get_summary() {
-            Ok(summary) => Json(serde_json::json!({"cost": summary})).into_response(),
+            Ok(summary) => {
+                tracing::debug!(
+                    session_cost_usd = summary.session_cost_usd,
+                    daily_cost_usd = summary.daily_cost_usd,
+                    monthly_cost_usd = summary.monthly_cost_usd,
+                    total_tokens = summary.total_tokens,
+                    request_count = summary.request_count,
+                    "Returning cost summary"
+                );
+                Json(serde_json::json!({"cost": summary})).into_response()
+            }
             Err(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": format!("Cost summary failed: {e}")})),
@@ -493,6 +503,7 @@ pub async fn handle_api_cost(
                 .into_response(),
         }
     } else {
+        tracing::warn!("Cost endpoint requested but cost tracker is disabled/unavailable");
         Json(serde_json::json!({
             "cost": {
                 "session_cost_usd": 0.0,
