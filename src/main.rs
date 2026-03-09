@@ -235,7 +235,8 @@ service (systemd/launchd) for auto-start on boot.
 Examples:
   zeroclaw daemon                   # use config defaults
   zeroclaw daemon -p 9090           # gateway on port 9090
-  zeroclaw daemon --host 127.0.0.1  # localhost only")]
+  zeroclaw daemon --host 127.0.0.1  # localhost only
+  zeroclaw daemon --debug           # enable verbose runtime logs")]
     Daemon {
         /// Port to listen on (use 0 for random available port); defaults to config gateway.port
         #[arg(short, long)]
@@ -244,6 +245,10 @@ Examples:
         /// Host to bind to; defaults to config gateway.host
         #[arg(long)]
         host: Option<String>,
+
+        /// Enable verbose debug logs for daemon runtime.
+        #[arg(long)]
+        debug: bool,
     },
 
     /// Manage OS service lifecycle (launchd/systemd user service)
@@ -688,11 +693,19 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Initialize logging - respects RUST_LOG env var, defaults to INFO
+    let daemon_debug = matches!(&cli.command, Commands::Daemon { debug: true, .. });
+    let env_filter = if std::env::var_os("RUST_LOG").is_some() {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+    } else if daemon_debug {
+        EnvFilter::new("zeroclaw=debug,info")
+    } else {
+        EnvFilter::new("info")
+    };
+
+    // Initialize logging - respects RUST_LOG env var, defaults to INFO.
+    // `zeroclaw daemon --debug` raises default verbosity when RUST_LOG is unset.
     let subscriber = fmt::Subscriber::builder()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
+        .with_env_filter(env_filter)
         .finish();
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
@@ -802,7 +815,11 @@ async fn main() -> Result<()> {
             gateway::run_gateway(&host, port, config).await
         }
 
-        Commands::Daemon { port, host } => {
+        Commands::Daemon {
+            port,
+            host,
+            debug: _,
+        } => {
             let port = port.unwrap_or(config.gateway.port);
             let host = host.unwrap_or_else(|| config.gateway.host.clone());
             if port == 0 {

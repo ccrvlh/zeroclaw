@@ -18,7 +18,7 @@ use crate::channels::{
 use crate::config::Config;
 use crate::cost::CostTracker;
 use crate::memory::{self, Memory, MemoryCategory};
-use crate::providers::{self, ChatMessage, Provider};
+use crate::providers::{self, ChatMessage, ChatRequest, Provider};
 use crate::runtime;
 use crate::security::pairing::{constant_time_eq, is_public_bind, PairingGuard};
 use crate::security::SecurityPolicy;
@@ -918,7 +918,10 @@ async fn persist_pairing_tokens(config: Arc<Mutex<Config>>, pairing: &PairingGua
 }
 
 /// Simple chat for webhook endpoint (no tools, for backward compatibility and testing).
-async fn run_gateway_chat_simple(state: &AppState, message: &str) -> anyhow::Result<String> {
+async fn run_gateway_chat_simple(
+    state: &AppState,
+    message: &str,
+) -> anyhow::Result<crate::providers::ChatResponse> {
     let (provider, model, temperature) = state.llm_snapshot();
     let user_messages = vec![ChatMessage::user(message)];
 
@@ -945,7 +948,14 @@ async fn run_gateway_chat_simple(state: &AppState, message: &str) -> anyhow::Res
         crate::multimodal::prepare_messages_for_provider(&messages, &multimodal_config).await?;
 
     provider
-        .chat_with_history(&prepared.messages, &model, temperature)
+        .chat(
+            ChatRequest {
+                messages: &prepared.messages,
+                tools: None,
+            },
+            &model,
+            temperature,
+        )
         .await
 }
 
@@ -1079,6 +1089,11 @@ async fn handle_webhook(
     match run_gateway_chat_simple(&state, message).await {
         Ok(response) => {
             let duration = started_at.elapsed();
+            let (input_tokens, output_tokens) = response
+                .usage
+                .as_ref()
+                .map(|u| (u.input_tokens, u.output_tokens))
+                .unwrap_or((None, None));
             state
                 .observer
                 .record_event(&crate::observability::ObserverEvent::LlmResponse {
@@ -1087,8 +1102,8 @@ async fn handle_webhook(
                     duration,
                     success: true,
                     error_message: None,
-                    input_tokens: None,
-                    output_tokens: None,
+                    input_tokens,
+                    output_tokens,
                 });
             state.observer.record_metric(
                 &crate::observability::traits::ObserverMetric::RequestLatency(duration),
@@ -1103,7 +1118,10 @@ async fn handle_webhook(
                     cost_usd: None,
                 });
 
-            let body = serde_json::json!({"response": response, "model": model_label});
+            let body = serde_json::json!({
+                "response": response.text_or_empty(),
+                "model": model_label
+            });
             (StatusCode::OK, Json(body))
         }
         Err(e) => {

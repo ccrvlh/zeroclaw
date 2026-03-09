@@ -10,6 +10,7 @@
 //! ```
 
 use super::AppState;
+use crate::providers::ChatRequest;
 use axum::{
     extract::{
         ws::{Message, WebSocket},
@@ -19,6 +20,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
+use std::time::Instant;
 
 #[derive(Deserialize)]
 pub struct WsQuery {
@@ -86,6 +88,21 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             .clone()
             .unwrap_or_else(|| "unknown".to_string());
         let (provider, model, temperature) = state.llm_snapshot();
+        let started_at = Instant::now();
+
+        state
+            .observer
+            .record_event(&crate::observability::ObserverEvent::AgentStart {
+                provider: provider_label.clone(),
+                model: model.clone(),
+            });
+        state
+            .observer
+            .record_event(&crate::observability::ObserverEvent::LlmRequest {
+                provider: provider_label.clone(),
+                model: model.clone(),
+                messages_count: 1,
+            });
 
         // Broadcast agent_start event
         let _ = state.event_tx.send(serde_json::json!({
@@ -129,14 +146,51 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             };
 
         match provider
-            .chat_with_history(&prepared.messages, &model, temperature)
+            .chat(
+                ChatRequest {
+                    messages: &prepared.messages,
+                    tools: None,
+                },
+                &model,
+                temperature,
+            )
             .await
         {
             Ok(response) => {
+                let duration = started_at.elapsed();
+                let (input_tokens, output_tokens) = response
+                    .usage
+                    .as_ref()
+                    .map(|u| (u.input_tokens, u.output_tokens))
+                    .unwrap_or((None, None));
+                state
+                    .observer
+                    .record_event(&crate::observability::ObserverEvent::LlmResponse {
+                        provider: provider_label.clone(),
+                        model: model.clone(),
+                        duration,
+                        success: true,
+                        error_message: None,
+                        input_tokens,
+                        output_tokens,
+                    });
+                state.observer.record_metric(
+                    &crate::observability::traits::ObserverMetric::RequestLatency(duration),
+                );
+                state
+                    .observer
+                    .record_event(&crate::observability::ObserverEvent::AgentEnd {
+                        provider: provider_label.clone(),
+                        model: model.clone(),
+                        duration,
+                        tokens_used: input_tokens.zip(output_tokens).map(|(i, o)| i + o),
+                        cost_usd: None,
+                    });
+
                 // Send the full response as a done message
                 let done = serde_json::json!({
                     "type": "done",
-                    "full_response": response,
+                    "full_response": response.text_or_empty(),
                 });
                 let _ = sender.send(Message::Text(done.to_string().into())).await;
 
@@ -148,7 +202,38 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }));
             }
             Err(e) => {
+                let duration = started_at.elapsed();
                 let sanitized = crate::providers::sanitize_api_error(&e.to_string());
+                state
+                    .observer
+                    .record_event(&crate::observability::ObserverEvent::LlmResponse {
+                        provider: provider_label.clone(),
+                        model: model.clone(),
+                        duration,
+                        success: false,
+                        error_message: Some(sanitized.clone()),
+                        input_tokens: None,
+                        output_tokens: None,
+                    });
+                state.observer.record_metric(
+                    &crate::observability::traits::ObserverMetric::RequestLatency(duration),
+                );
+                state
+                    .observer
+                    .record_event(&crate::observability::ObserverEvent::Error {
+                        component: "ws_chat".to_string(),
+                        message: sanitized.clone(),
+                    });
+                state
+                    .observer
+                    .record_event(&crate::observability::ObserverEvent::AgentEnd {
+                        provider: provider_label.clone(),
+                        model: model.clone(),
+                        duration,
+                        tokens_used: None,
+                        cost_usd: None,
+                    });
+
                 let err = serde_json::json!({
                     "type": "error",
                     "message": sanitized,
