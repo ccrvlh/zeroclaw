@@ -561,8 +561,8 @@ impl Default for IdentityConfig {
 /// Cost tracking and budget enforcement configuration (`[cost]` section).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CostConfig {
-    /// Enable cost tracking (default: false)
-    #[serde(default)]
+    /// Enable cost tracking (default: true)
+    #[serde(default = "default_cost_enabled")]
     pub enabled: bool,
 
     /// Daily spending limit in USD (default: 10.00)
@@ -602,6 +602,10 @@ fn default_daily_limit() -> f64 {
     10.0
 }
 
+fn default_cost_enabled() -> bool {
+    true
+}
+
 fn default_monthly_limit() -> f64 {
     100.0
 }
@@ -613,7 +617,7 @@ fn default_warn_percent() -> u8 {
 impl Default for CostConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: default_cost_enabled(),
             daily_limit_usd: default_daily_limit(),
             monthly_limit_usd: default_monthly_limit(),
             warn_at_percent: default_warn_percent(),

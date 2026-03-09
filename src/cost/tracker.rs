@@ -150,12 +150,12 @@ impl CostTracker {
             return Ok(());
         }
 
-        let (input_price, output_price) = self
-            .config
-            .prices
-            .get(model)
-            .map(|pricing| (pricing.input, pricing.output))
-            .unwrap_or((0.0, 0.0));
+        let (input_price, output_price) = self.lookup_model_pricing(model).unwrap_or((0.0, 0.0));
+        if input_price == 0.0 && output_price == 0.0 {
+            tracing::warn!(
+                "No cost pricing match for model '{model}'. Add [cost.prices.\"{model}\"] to config to track USD cost."
+            );
+        }
 
         let usage = TokenUsage::new(
             model.to_string(),
@@ -165,6 +165,15 @@ impl CostTracker {
             output_price,
         );
         self.record_usage(usage)
+    }
+
+    fn lookup_model_pricing(&self, model: &str) -> Option<(f64, f64)> {
+        for candidate in pricing_candidates(model) {
+            if let Some(pricing) = self.config.prices.get(&candidate) {
+                return Some((pricing.input, pricing.output));
+            }
+        }
+        None
     }
 
     /// Get the current cost summary.
@@ -207,6 +216,40 @@ impl CostTracker {
         let storage = self.lock_storage();
         storage.get_cost_for_month(year, month)
     }
+}
+
+fn pricing_candidates(model: &str) -> Vec<String> {
+    let raw = model.trim();
+    if raw.is_empty() {
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::new();
+
+    // Try exact first (fast path), then case-insensitive and normalized aliases.
+    candidates.push(raw.to_string());
+    candidates.push(raw.to_ascii_lowercase());
+
+    if let Some((_, suffix)) = raw.split_once('/') {
+        candidates.push(suffix.to_string());
+        candidates.push(suffix.to_ascii_lowercase());
+    }
+
+    let mut expanded = Vec::new();
+    for candidate in &candidates {
+        expanded.push(candidate.clone());
+        expanded.push(candidate.replace('.', "-"));
+        expanded.push(candidate.replace('-', "."));
+    }
+
+    // Preserve insertion order while removing duplicates.
+    let mut deduped = Vec::new();
+    for candidate in expanded {
+        if !deduped.iter().any(|item| item == &candidate) {
+            deduped.push(candidate);
+        }
+    }
+    deduped
 }
 
 fn resolve_storage_path(workspace_dir: &Path) -> Result<PathBuf> {
@@ -588,5 +631,27 @@ mod tests {
         let summary = tracker.get_summary().unwrap();
         assert_eq!(summary.request_count, 1);
         assert!((summary.session_cost_usd - 0.002).abs() < 1e-12);
+    }
+
+    #[test]
+    fn record_llm_usage_matches_dash_dot_aliases() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = enabled_config();
+        config.prices.insert(
+            "anthropic/claude-sonnet-4.6".to_string(),
+            crate::config::schema::ModelPricing {
+                input: 3.0,
+                output: 15.0,
+            },
+        );
+
+        let tracker = CostTracker::new(config, tmp.path()).unwrap();
+        tracker
+            .record_llm_usage("anthropic/claude-sonnet-4-6", Some(1000), Some(500))
+            .unwrap();
+
+        let summary = tracker.get_summary().unwrap();
+        assert_eq!(summary.request_count, 1);
+        assert!(summary.session_cost_usd > 0.0);
     }
 }

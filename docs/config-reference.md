@@ -224,7 +224,7 @@ Notes:
 
 | Key | Default | Purpose |
 |---|---|---|
-| `enabled` | `false` | Enable cost tracking |
+| `enabled` | `true` | Enable cost tracking |
 | `daily_limit_usd` | `10.00` | Daily spending limit in USD |
 | `monthly_limit_usd` | `100.00` | Monthly spending limit in USD |
 | `warn_at_percent` | `80` | Warn when spending reaches this percentage of limit |
