@@ -810,11 +810,18 @@ async fn main() -> Result<()> {
         }
 
         Commands::Status => {
+            let gateway_host = config.gateway.host.as_str();
+            let gateway_port = config.gateway.port;
+            let gateway_url = format!("http://{gateway_host}:{gateway_port}");
+            let ui_url = format!("{gateway_url}/");
+
             println!("🦀 ZeroClaw Status");
             println!();
             println!("Version:     {}", env!("CARGO_PKG_VERSION"));
             println!("Workspace:   {}", config.workspace_dir.display());
             println!("Config:      {}", config.config_path.display());
+            println!("Gateway:     {gateway_url} ({gateway_host}:{gateway_port})");
+            println!("UI:          {ui_url} ({gateway_host}:{gateway_port})");
             println!();
             println!(
                 "🤖 Provider:      {}",
