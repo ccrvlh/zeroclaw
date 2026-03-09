@@ -888,17 +888,23 @@ async fn main() -> Result<()> {
             println!();
             println!("Channels:");
             println!("  CLI:      ✅ always");
-            for (channel, configured) in config.channels_config.channels() {
-                println!(
-                    "  {:9} {}",
-                    channel.name(),
-                    if configured {
-                        "✅ configured"
-                    } else {
-                        "❌ not configured"
-                    }
-                );
+            let enabled_channels: Vec<_> = config
+                .channels_config
+                .channels()
+                .into_iter()
+                .filter_map(|(channel, configured)| configured.then(|| channel.name().to_string()))
+                .collect();
+            if enabled_channels.is_empty() {
+                println!("  (no additional channels enabled)");
+            } else {
+                for channel in enabled_channels {
+                    println!("  {channel:9} ✅ enabled");
+                }
             }
+            println!(
+                "  Hint: edit {} to enable more channels.",
+                config.config_path.display()
+            );
             println!();
             println!("Peripherals:");
             println!(
